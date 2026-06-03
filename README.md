@@ -19,6 +19,12 @@ I can also chat with the bot directly to ask when the next check is running, or 
 - **Notifications**: Telegram Bot API with inline keyboards and callback queries
 - **API**: Virgin Active private mobile API, reverse-engineered via mitmproxy
 
+## TODO
+
+- [ ] Support booking group fitness classes (not just courts)
+- [ ] Integrate with other platforms for Padel court bookings
+- [ ] Support multiple Virgin Active locations via the same API
+
 ## Notes
 
 Built for personal use. All credentials are stored as Wrangler secrets and never committed.
