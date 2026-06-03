@@ -1,0 +1,17 @@
+name = "virgin-active-booker"
+main = "src/index.js"
+compatibility_date = "2026-06-03"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "1d76c77c24a242f2b35773b39b3fa689"
+
+[vars]
+# Secrets (set via `wrangler secret put`):
+#   VA_USERNAME          - your Virgin Active login email
+#   VA_PASSWORD          - your Virgin Active password
+#   TELEGRAM_BOT_TOKEN   - token from @BotFather
+#   TELEGRAM_CHAT_ID     - your Telegram chat/group ID

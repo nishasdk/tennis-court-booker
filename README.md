@@ -1,100 +1,24 @@
 # Virgin Active Court Booker
 
-A library that books tennis court at [Virgin Active](http://www.virginactive.co.uk/) health clubs.
+A personal Telegram bot that books tennis courts at my local Virgin Active gym for me.
 
-The library includes a command-line utility, which can be run on Windows, Mac or Linux.
+## Why
 
-In order to successfully use this utility, you require a valid account on the Virgin Active Member's portal.
+My gym's app is unreliable on poor connections, and popular slots go fast. I built a bot I can message from anywhere to check availability and book a court — no app required.
 
-## Features
+## How it works
 
-1. List available courts on a given day
+A Cloudflare Worker runs in the background and checks court availability throughout the day. When it finds an open slot that matches my preferences, it books it and lets me know via Telegram.
 
-2. Book courts on a given day, at a given time
+I can also chat with the bot directly to ask when the next check is running, or set up a booking preference interactively using inline buttons — pick a time window, select which days I'm free, and confirm.
 
-	a. (Optionally) book specific courts
+## Stack
 
-	b. (Optionally) filter for indoor/outdoor courts
+- **Runtime**: Cloudflare Workers (scheduled + fetch handlers)
+- **State**: Cloudflare KV (auth token cache, scheduling state, booking preferences)
+- **Notifications**: Telegram Bot API with inline keyboards and callback queries
+- **API**: Virgin Active private mobile API, reverse-engineered via mitmproxy
 
-3. View your current bookings
+## Notes
 
-## Running the command-line utility
-
-1. Build the code
-
-		> git clone git@github.com:clormor/virgin-active-booker.git
-		> cd virgin-active-booker
-		> ./gradlew installApp
-		> cd /build/install/virgin-active-booker/bin/
-		
-2. Display the help message
-
-		> ./virgin-active-booker -h
-		usage: virgin-active-booker
-		 -b,--book                  book courts
-		 -court <court>             specify which court to book
-		 -d,--date <date>           the date (relative to today's date). Must be
-		                            between 0 and 7 (default: 0)
-		 -h,--help                  print this help message
-		 -indoor                    match any indoor courts (booking)
-		 -l,--list                  list available courts
-		 -outdoor                   match any outdoor courts (booking)
-		 -p,--password <password>   your member's portal password
-		 -t,--time <time>           hour of day to list or book courts (24-hour
-		                            format)
-		 -u,--username <username>   your member's portal username
-		 -v,--view <username>       view your current court bookings
-		 
-3. List any available tennis courts tomorrow
-
-		> ./virgin-active-booker -u <username> -p <password> -l -d 1
-		Sun, Mar 23
-		--------------------------------
-		7:00	--> No courts available
-		8:00	--> 3, 4, 5, 6, A, B, C 
-		9:00	--> 3, 5, A, B, C 
-		10:00	--> A, B, C 
-		11:00	--> A, B, C 
-		12:00	--> A, B, C 
-		13:00	--> B, C 
-		14:00	--> C 
-		15:00	--> B, C 
-		16:00	--> B, C 
-		17:00	--> A, B, C 
-		18:00	--> A, B, C 
-		19:00	--> A, B, C 
-		20:00	--> No courts available
-		21:00	--> No courts available
-		22:00	--> No courts available
-
-4. Book a court tomorrow, at 9am
-
-		> ./virgin-active-booker -u <username> -p <password> -b -d 1 -t 9
-		Court 3 has been booked at 9:00 on Sun, Mar 23
-
-5. View your bookings
-
-		> ./virgin-active-booker -u <username> -p <password> -v
-		1. Mon Mar 24, 08:00 (Court 2)
-		2. Sun Mar 30, 21:00 (Court 5)
-
-## Advanced Options
-
-1. Specify indoor/outdoor courts when booking
-
-		> ./virgin-active-booker -u <username> -p <password> -b -d 1 -t 9 -outdoor
-		Court A has been booked at 9:00 on Sun, Mar 23
-		
-		> ./virgin-active-booker -u <username> -p <password> -b -d 1 -t 18 -indoor
-		No courts available
-		
-2. Specify a specific court to book
-
-		> ./virgin-active-booker -u <username> -p <password> -b -d 1 -t 8 -court 5
-		Court 5 has been booked at 8:00 on Sun, Mar 23
-		
-3. Options can be combined to broaden your selection
-
-		// will book ANY indoor court OR court A
-		> ./virgin-active-booker -u <username> -p <password> -b -d 1 -t 8 -indoor -court a
-
+Built for personal use. All credentials are stored as Wrangler secrets and never committed.

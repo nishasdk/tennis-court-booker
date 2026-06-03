@@ -1,0 +1,9 @@
+{
+  "name": "virgin-active-booker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx wrangler dev --test-scheduled",
+    "deploy": "npx wrangler deploy"
+  }
+}
