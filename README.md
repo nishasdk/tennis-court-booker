@@ -19,6 +19,10 @@ I can also chat with the bot directly to ask when the next check is running, or 
 - **Notifications**: Telegram Bot API with inline keyboards and callback queries
 - **API**: Virgin Active private mobile API, reverse-engineered via mitmproxy
 
+## Known Issues
+
+- [ ] Auth token refresh and login failures are silent — errors are only logged, not surfaced to Telegram
+
 ## TODO
 
 - [ ] Support booking group fitness classes (not just courts)
