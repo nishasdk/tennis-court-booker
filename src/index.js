@@ -2,8 +2,7 @@ const CLUB_ID = "47";
 const ACTIVITY_ID = 41601;
 const VAPI_BASE = "https://vapi.virginactive.com/vapi/2.0.1";
 
-// TODO: replace once login endpoint is confirmed from a cold-start mitmproxy capture
-const AUTH_URL = "https://vapieuprodapim.azure-api.net/auth/login";
+const AUTH_URL = `${VAPI_BASE}/sessions`;
 
 const WINDOW_START = 7 * 60 + 30; // 07:30 in minutes
 const WINDOW_END = 20 * 60 + 30;  // 20:30 in minutes
@@ -326,8 +325,13 @@ async function checkAvailability(env, controller) {
   let token;
   try {
     token = await getAuthToken(env);
+    await env.STATE.delete("auth-error-notified");
   } catch (err) {
     console.error(`Auth failed: ${err.message}`);
+    if (!await env.STATE.get("auth-error-notified")) {
+      await env.STATE.put("auth-error-notified", "1");
+      await notify(env, `⚠️ Auth failed: ${err.message}`);
+    }
     return;
   }
 
@@ -354,9 +358,14 @@ async function checkAvailability(env, controller) {
 
   if (!res.ok) {
     console.error(`API error: ${res.status}`);
+    if (!await env.STATE.get("api-error-notified")) {
+      await env.STATE.put("api-error-notified", "1");
+      await notify(env, `⚠️ API error: ${res.status}`);
+    }
     return;
   }
 
+  await env.STATE.delete("api-error-notified");
   const body = await res.text();
   const slots = findAvailableSlots(body);
 
@@ -500,20 +509,41 @@ async function getAuthToken(env) {
   const res = await fetch(AUTH_URL, {
     method: "POST",
     headers: { "content-type": "application/json", ...STATIC_HEADERS },
-    body: JSON.stringify({ username: env.VA_USERNAME, password: env.VA_PASSWORD }),
+    body: JSON.stringify({ memberId: env.VA_USERNAME, password: env.VA_PASSWORD }),
   });
 
-  if (!res.ok) throw new Error(`Login failed: ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`Login failed: ${res.status} — ${errBody.slice(0, 300)}`);
+  }
 
   const data = await res.json();
+  const authToken = data.token;
 
-  // TODO: adjust field names once login response shape is confirmed
-  const token = {
-    authToken: data.authToken ?? data.token ?? data.access_token,
-    loyaltyToken: data.loyaltyToken ?? data.xLoyalty,
-    exp: data.exp ?? Date.now() / 1000 + 3600,
-  };
+  // Decode exp from JWT payload without a library
+  let exp;
+  try {
+    const payload = JSON.parse(atob(authToken.split(".")[1]));
+    exp = payload.exp;
+  } catch {
+    exp = Date.now() / 1000 + 3600;
+  }
 
+  // Fetch member to get loyalty token
+  let loyaltyToken;
+  try {
+    const memberRes = await fetch(`${VAPI_BASE}/member`, {
+      headers: { ...STATIC_HEADERS, "x-auth-token": authToken },
+    });
+    if (memberRes.ok) {
+      const member = await memberRes.json();
+      loyaltyToken = member.loyalty ?? null;
+    }
+  } catch {
+    // loyalty is optional — API calls still work without it
+  }
+
+  const token = { authToken, loyaltyToken, exp };
   await env.STATE.put("auth:token", JSON.stringify(token), { expirationTtl: 3600 });
   return token;
 }

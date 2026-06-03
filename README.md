@@ -21,7 +21,7 @@ I can also chat with the bot directly to ask when the next check is running, or 
 
 ## Known Issues
 
-- [ ] Auth token refresh and login failures are silent — errors are only logged, not surfaced to Telegram
+- [x] Auth token refresh and login failures are silent — errors are now surfaced to Telegram once per failure window
 
 ## TODO
 
