@@ -25,6 +25,7 @@ I can also chat with the bot directly to ask when the next check is running, or 
 
 ## TODO
 
+- [x] FIX: token refreshes and login fails silently — auth errors now surfaced to Telegram once per failure window; login endpoint and request format corrected
 - [ ] Support booking group fitness classes (not just courts)
 - [ ] Integrate with other platforms for Padel court bookings
 - [ ] Support multiple Virgin Active locations via the same API
