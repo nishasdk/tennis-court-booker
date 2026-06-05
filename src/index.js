@@ -306,16 +306,25 @@ async function answerCallbackQuery(env, callbackQueryId) {
 
 // ── Scheduling & availability ─────────────────────────────────────────────────
 
-function londonMinutes(date) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
+function londonParts(date) {
+  return new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     hour: "numeric",
     minute: "numeric",
     hour12: false,
   }).formatToParts(date);
+}
+
+function londonMinutes(date) {
+  const parts = londonParts(date);
   const h = parseInt(parts.find((p) => p.type === "hour").value);
   const m = parseInt(parts.find((p) => p.type === "minute").value);
   return h * 60 + m;
+}
+
+function londonHour(date) {
+  const parts = londonParts(date);
+  return parseInt(parts.find((p) => p.type === "hour").value);
 }
 
 function randomDelayMs() {
@@ -408,7 +417,25 @@ async function checkAvailability(env, controller) {
     await appendSlotLog(env, now, slots, pref);
   }
 
-  await notify(env, buildMessage(slots, controller, nextCheckTime));
+  // Notify immediately if slots found; otherwise only at 08:00, 12:00, 20:00 London time
+  if (slots.length > 0) {
+    await notify(env, buildMessage(slots, controller, nextCheckTime));
+  } else {
+    const hour = londonHour(new Date(now));
+    const today = toDateString(now);
+    const windows = [{ h: 8, key: "notified:8" }, { h: 12, key: "notified:12" }, { h: 20, key: "notified:20" }];
+    for (const { h, key } of windows) {
+      if (hour >= h && hour < h + 1) {
+        const sent = await env.STATE.get(key);
+        if (sent !== today) {
+          await env.STATE.put(key, today);
+          await notify(env, buildMessage(slots, controller, nextCheckTime));
+        }
+        break;
+      }
+    }
+  }
+
   await env.STATE.put("last-run", new Date(now).toISOString());
 }
 
