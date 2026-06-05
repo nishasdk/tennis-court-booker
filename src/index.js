@@ -132,11 +132,27 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
+  if (cmd === "/log") {
+    const log = await env.STATE.get("slot-log", { type: "json" });
+    if (!log || log.length === 0) {
+      await sendMessage(env, chatId, "No slots seen yet since the last deploy.");
+      return;
+    }
+    const lines = log.slice(0, 10).map((e) => {
+      const slotList = e.slots.join(", ");
+      const prefNote = e.pref ? ` (pref: ${e.pref})` : " (no pref set)";
+      const matchNote = e.matched.length > 0 ? ` ✅ matched: ${e.matched.join(", ")}` : " ❌ no match";
+      return `${fmt(new Date(e.at))}\n  Slots: ${slotList}${prefNote}${matchNote}`;
+    });
+    await sendMessage(env, chatId, `Last ${lines.length} checks with open slots:\n\n${lines.join("\n\n")}`);
+    return;
+  }
+
   if (cmd === "/help") {
     await sendMessage(
       env,
       chatId,
-      "/book — set up auto-booking interactively\n/book status — show current preference\n/book cancel — cancel auto-booking\n/next — when is the next check\n/last — when was the last check",
+      "/book — set up auto-booking interactively\n/book status — show current preference\n/book cancel — cancel auto-booking\n/next — when is the next check\n/last — when was the last check\n/log — history of checks where slots were found",
     );
   }
 }
@@ -387,8 +403,26 @@ async function checkAvailability(env, controller) {
     }
   }
 
+  // Log any seen slots (whether booked, skipped, or no pref set)
+  if (slots.length > 0) {
+    await appendSlotLog(env, now, slots, pref);
+  }
+
   await notify(env, buildMessage(slots, controller, nextCheckTime));
   await env.STATE.put("last-run", new Date(now).toISOString());
+}
+
+async function appendSlotLog(env, now, slots, pref) {
+  const existing = await env.STATE.get("slot-log", { type: "json" }) ?? [];
+  const matched = pref ? slots.filter((s) => slotMatchesPref(s, pref)).map((s) => `${s.date} ${s.time}`) : [];
+  const entry = {
+    at: new Date(now).toISOString(),
+    slots: slots.map((s) => `${s.date} ${s.time}`),
+    pref: pref ? `${pref.from}–${pref.to} on ${pref.days?.join(",")||"any day"}` : null,
+    matched,
+  };
+  const updated = [entry, ...existing].slice(0, 30);
+  await env.STATE.put("slot-log", JSON.stringify(updated));
 }
 
 // ── Booking ───────────────────────────────────────────────────────────────────
