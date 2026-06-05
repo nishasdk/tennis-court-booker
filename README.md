@@ -12,6 +12,8 @@ A Cloudflare Worker runs in the background and checks court availability through
 
 I can also chat with the bot directly to ask when the next check is running, or set up a booking preference interactively using inline buttons — pick a time window, select which days I'm free, and confirm.
 
+Whenever the bot finds open slots, it logs them — including what my preference was at the time and whether any slot matched. `/log` shows the last 10 of these so I can see slots that were found but didn't get booked, and why.
+
 ## Stack
 
 - **Runtime**: Cloudflare Workers (scheduled + fetch handlers)
