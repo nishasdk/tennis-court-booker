@@ -10,9 +10,12 @@ My gym's app is unreliable on poor connections, and popular slots go fast. I bui
 
 A Cloudflare Worker runs in the background and checks court availability throughout the day. When it finds an open slot that matches my preferences, it books it and lets me know via Telegram.
 
-I can also chat with the bot directly to ask when the next check is running, or set up a booking preference interactively using inline buttons — pick a time window, select which days I'm free, and confirm.
+I can also chat with the bot directly to manage everything:
 
-Whenever the bot finds open slots, it logs them — including what my preference was at the time and whether any slot matched. `/log` shows the last 10 of these so I can see slots that were found but didn't get booked, and why.
+- `/bookings` — add or remove auto-booking preferences via inline buttons. Select morning, afternoon, or evening (multi-select), pick a time window per period, choose which days, and confirm. Warns on overlaps with existing preferences. Supports multiple active preferences simultaneously.
+- `/slots` — view current preferences as a per-slot day grid
+- `/log` — history of the last 10 checks that found open slots, including whether any matched a preference and why
+- `/next` / `/last` — scheduling info
 
 ## Stack
 

@@ -10,12 +10,11 @@ const BOOKING_RELEASE_END = 7 * 60 + 35; // always run within 07:30–07:35 rega
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-const TIME_PRESETS = [
-  ["07:00–09:00", "08:00–10:00"],
-  ["09:00–11:00", "10:00–12:00"],
-  ["12:00–14:00", "14:00–16:00"],
-  ["17:00–19:00", "18:00–20:00"],
-];
+const PERIOD_PRESETS = {
+  morning:   [["07:00", "09:00"], ["08:00", "10:00"], ["09:00", "11:00"]],
+  afternoon: [["12:00", "14:00"], ["13:00", "15:00"], ["14:00", "16:00"]],
+  evening:   [["17:00", "19:00"], ["18:00", "20:00"], ["19:00", "21:00"]],
+};
 
 const STATIC_HEADERS = {
   "x-app-id": "2BoKHJPfAB",
@@ -70,18 +69,18 @@ async function handleTelegramUpdate(update, env) {
   const text = msg.text.trim();
   const cmd = text.split("@")[0].toLowerCase();
 
-  // Check if we're waiting for a custom time from this user
+  // Check if we're waiting for a custom time input
   const convoRaw = await env.STATE.get(`convo:${chatId}`);
-  if (convoRaw) {
+  if (convoRaw && !cmd.startsWith("/")) {
     const convo = JSON.parse(convoRaw);
-    if (convo.step === "awaiting_custom_time" && !cmd.startsWith("/")) {
+    if (convo.step === "awaiting_period_custom_time") {
       const match = text.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})$/);
       if (!match) {
-        await sendMessage(env, chatId, "Couldn't parse that. Enter a range like: 14:00-16:00");
+        await sendMessage(env, chatId, "Couldn't parse that. Enter a range like 14:00-16:00");
         return;
       }
       const [, from, to] = match;
-      await startDaySelection(env, chatId, from, to);
+      await advancePeriodTime(env, chatId, convo, from, to);
       return;
     }
   }
@@ -106,29 +105,42 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
-  if (cmd.startsWith("/book")) {
+  if (cmd.startsWith("/bookings")) {
     const args = text.slice(cmd.length).trim();
 
     if (args === "cancel") {
       await env.STATE.delete("booking-pref");
       await env.STATE.delete(`convo:${chatId}`);
-      await sendMessage(env, chatId, "Booking preference cancelled.");
+      await sendMessage(env, chatId, "All booking preferences cleared.");
       return;
     }
 
-    if (args === "status") {
-      const pref = await env.STATE.get("booking-pref", { type: "json" });
-      if (!pref) {
-        await sendMessage(env, chatId, "No booking preference set. Send /book to set one.");
-      } else {
-        const daysText = pref.days?.length > 0 ? pref.days.join(", ") : "any day";
-        await sendMessage(env, chatId, `Current: ${pref.from}–${pref.to} on ${daysText}\n\nSend /book cancel to remove.`);
-      }
+    const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    if (prefs.length === 0) {
+      const res = await sendMessageWithKeyboard(env, chatId, "When would you like to play? (select all that apply)", buildPeriodKeyboard([]));
+      const msgId = res?.result?.message_id;
+      await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "period_select", selectedPeriods: [], messageId: msgId }), { expirationTtl: 1800 });
+    } else {
+      const res = await sendMessageWithKeyboard(env, chatId, `Current preferences:\n\n${formatPrefs(prefs)}\n\nWhat would you like to do?`, buildBookMenuKeyboard());
+      const msgId = res?.result?.message_id;
+      await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "book_menu", messageId: msgId }), { expirationTtl: 1800 });
+    }
+    return;
+  }
+
+  if (cmd === "/slots") {
+    const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    if (prefs.length === 0) {
+      await sendMessage(env, chatId, "No preferences set yet. Use /bookings to set some.");
       return;
     }
-
-    // Launch interactive flow
-    await sendMessageWithKeyboard(env, chatId, "When would you like to play?", buildTimeKeyboard());
+    const allDays = [...DAY_NAMES.slice(1), DAY_NAMES[0]];
+    const lines = prefs.map((p, i) => {
+      const anyDay = !p.days?.length;
+      const dayLines = allDays.map((d) => `${anyDay || p.days.includes(d) ? "✅" : "◻️"}  ${d}`);
+      return `Slot ${i + 1} — ⏰ ${p.from}–${p.to}\n${dayLines.join("\n")}`;
+    });
+    await sendMessage(env, chatId, lines.join("\n\n"));
     return;
   }
 
@@ -152,7 +164,7 @@ async function handleTelegramUpdate(update, env) {
     await sendMessage(
       env,
       chatId,
-      "/book — set up auto-booking interactively\n/book status — show current preference\n/book cancel — cancel auto-booking\n/next — when is the next check\n/last — when was the last check\n/log — history of checks where slots were found",
+      "/bookings — set up auto-booking interactively\n/bookings status — show current preference\n/bookings cancel — cancel auto-booking\n/slots — show your current time and day preferences\n/next — when is the next check\n/last — when was the last check\n/log — history of checks where slots were found",
     );
   }
 }
@@ -165,32 +177,68 @@ async function handleCallbackQuery(query, env) {
 
   await answerCallbackQuery(env, query.id);
 
-  // Time preset selected
-  if (data.startsWith("time:")) {
-    const range = data.slice(5); // "08:00–10:00"
-    const [from, to] = range.split("–");
-    await env.STATE.put(convoKey, JSON.stringify({ step: "awaiting_days", from, to, days: [], messageId }), { expirationTtl: 1800 });
-    await editMessageText(env, chatId, messageId, `Time: ${from}–${to}\n\nWhich days are you free?`, buildDayKeyboard([]));
+  const convoRaw = await env.STATE.get(convoKey);
+  const convo = convoRaw ? JSON.parse(convoRaw) : null;
+
+  // ── Book menu ──
+  if (data === "book:add") {
+    const newConvo = { step: "period_select", selectedPeriods: [], messageId };
+    await env.STATE.put(convoKey, JSON.stringify(newConvo), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, messageId, "When would you like to play? (select all that apply)", buildPeriodKeyboard([]));
     return;
   }
 
-  // Custom time entry
-  if (data === "time:custom") {
-    await env.STATE.put(convoKey, JSON.stringify({ step: "awaiting_custom_time" }), { expirationTtl: 1800 });
-    await editMessageText(env, chatId, messageId, "Type your preferred time range, e.g: 14:00-16:00");
+  if (data === "book:remove") {
+    const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    await env.STATE.put(convoKey, JSON.stringify({ step: "remove_select", messageId }), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, messageId, "Which slot would you like to remove?", buildRemoveKeyboard(prefs));
     return;
   }
 
-  // Day toggled
-  if (data.startsWith("day:")) {
-    const convoRaw = await env.STATE.get(convoKey);
-    if (!convoRaw) {
-      await sendMessage(env, chatId, "Session expired — send /book to start again.");
+  // ── Period selection ──
+  if (data.startsWith("period:") && data !== "period:confirm") {
+    if (!convo || convo.step !== "period_select") return;
+    const period = data.slice(7);
+    convo.selectedPeriods = convo.selectedPeriods.includes(period)
+      ? convo.selectedPeriods.filter((p) => p !== period)
+      : [...convo.selectedPeriods, period];
+    await env.STATE.put(convoKey, JSON.stringify(convo), { expirationTtl: 1800 });
+    await editMessageReplyMarkup(env, chatId, messageId, buildPeriodKeyboard(convo.selectedPeriods));
+    return;
+  }
+
+  if (data === "period:confirm") {
+    if (!convo || !convo.selectedPeriods?.length) {
+      await answerCallbackQuery(env, query.id, "Select at least one period first.");
       return;
     }
-    const convo = JSON.parse(convoRaw);
-    const day = data.slice(4);
+    const [current, ...pending] = convo.selectedPeriods;
+    const newConvo = { step: "time_for_period", currentPeriod: current, pendingPeriods: pending, newSlots: [], messageId };
+    await env.STATE.put(convoKey, JSON.stringify(newConvo), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, messageId, `Preferred time for ${capitalise(current)}?`, buildPeriodTimeKeyboard(current));
+    return;
+  }
 
+  // ── Per-period time selection ──
+  if (data === "ptime:custom") {
+    if (!convo || convo.step !== "time_for_period") return;
+    convo.step = "awaiting_period_custom_time";
+    await env.STATE.put(convoKey, JSON.stringify(convo), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, messageId, `Enter your ${capitalise(convo.currentPeriod)} time range, e.g. 14:00-16:00`);
+    return;
+  }
+
+  if (data.startsWith("ptime:")) {
+    if (!convo || convo.step !== "time_for_period") return;
+    const [from, to] = data.slice(6).split("-");
+    await advancePeriodTime(env, chatId, convo, from, to);
+    return;
+  }
+
+  // ── Day toggled ──
+  if (data.startsWith("day:")) {
+    if (!convo) { await sendMessage(env, chatId, "Session expired — send /bookings to start again."); return; }
+    const day = data.slice(4);
     if (day === "any") {
       convo.days = [];
     } else if (convo.days.includes(day)) {
@@ -198,50 +246,118 @@ async function handleCallbackQuery(query, env) {
     } else {
       convo.days.push(day);
     }
-
     await env.STATE.put(convoKey, JSON.stringify(convo), { expirationTtl: 1800 });
     await editMessageReplyMarkup(env, chatId, messageId, buildDayKeyboard(convo.days));
     return;
   }
 
-  // Confirm booking preference
+  // ── Confirm days → save ──
   if (data === "days:confirm") {
-    const convoRaw = await env.STATE.get(convoKey);
-    if (!convoRaw) {
-      await sendMessage(env, chatId, "Session expired — send /book to start again.");
-      return;
-    }
-    const convo = JSON.parse(convoRaw);
+    if (!convo) { await sendMessage(env, chatId, "Session expired — send /bookings to start again."); return; }
+    const existingPrefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    const newEntries = convo.newSlots.map((s) => ({ from: s.from, to: s.to, days: convo.days }));
+    const overlaps = findOverlaps(newEntries, existingPrefs);
+    const updated = [...existingPrefs, ...newEntries];
+    await env.STATE.put("booking-pref", JSON.stringify(updated));
     await env.STATE.delete(convoKey);
-    await env.STATE.put("booking-pref", JSON.stringify({ from: convo.from, to: convo.to, days: convo.days }));
-    const daysText = convo.days.length > 0 ? convo.days.join(", ") : "any day";
-    await editMessageText(env, chatId, messageId, `✅ Set: ${convo.from}–${convo.to} on ${daysText}\n\nI'll book the first available court matching this.`);
+    const daysText = convo.days.length ? convo.days.join(", ") : "any day";
+    const addedText = newEntries.map((e) => `• ${e.from}–${e.to}`).join("\n");
+    const overlapNote = overlaps.length ? `\n\n⚠️ Overlap with existing: ${overlaps.join("; ")}` : "";
+    await editMessageText(env, chatId, messageId, `✅ Added:\n${addedText}\non ${daysText}${overlapNote}\n\nAll preferences:\n${formatPrefs(updated)}`);
+    return;
+  }
+
+  // ── Remove a slot ──
+  if (data.startsWith("remove:")) {
+    const idx = parseInt(data.slice(7));
+    const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    const updated = prefs.filter((_, i) => i !== idx);
+    if (updated.length) {
+      await env.STATE.put("booking-pref", JSON.stringify(updated));
+    } else {
+      await env.STATE.delete("booking-pref");
+    }
+    await env.STATE.delete(convoKey);
+    const msg = updated.length ? `✅ Removed. Remaining:\n\n${formatPrefs(updated)}` : "✅ Removed. No preferences remaining.";
+    await editMessageText(env, chatId, messageId, msg);
+    return;
+  }
+
+  if (data === "remove:cancel") {
+    await env.STATE.delete(convoKey);
+    const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+    await editMessageText(env, chatId, messageId, `Cancelled.\n\nCurrent preferences:\n\n${formatPrefs(prefs)}`);
+    return;
   }
 }
 
-async function startDaySelection(env, chatId, from, to) {
+async function advancePeriodTime(env, chatId, convo, from, to) {
   const convoKey = `convo:${chatId}`;
-  const res = await sendMessageWithKeyboard(env, chatId, `Time: ${from}–${to}\n\nWhich days are you free?`, buildDayKeyboard([]));
-  const messageId = res?.result?.message_id;
-  await env.STATE.put(convoKey, JSON.stringify({ step: "awaiting_days", from, to, days: [], messageId }), { expirationTtl: 1800 });
+  const newSlots = [...(convo.newSlots ?? []), { from, to }];
+  if (convo.pendingPeriods?.length) {
+    const [next, ...rest] = convo.pendingPeriods;
+    const updated = { ...convo, step: "time_for_period", currentPeriod: next, pendingPeriods: rest, newSlots };
+    await env.STATE.put(convoKey, JSON.stringify(updated), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, convo.messageId, `Preferred time for ${capitalise(next)}?`, buildPeriodTimeKeyboard(next));
+  } else {
+    const updated = { ...convo, step: "day_select", newSlots, days: [] };
+    await env.STATE.put(convoKey, JSON.stringify(updated), { expirationTtl: 1800 });
+    const summary = newSlots.map((s) => `• ${s.from}–${s.to}`).join("\n");
+    await editMessageText(env, chatId, convo.messageId, `Adding:\n${summary}\n\nWhich days?`, buildDayKeyboard([]));
+  }
 }
 
 // ── Keyboard builders ─────────────────────────────────────────────────────────
 
-function buildTimeKeyboard() {
+function buildBookMenuKeyboard() {
   return {
     inline_keyboard: [
-      ...TIME_PRESETS.map((row) =>
-        row.map((t) => ({ text: t, callback_data: `time:${t}` }))
-      ),
-      [{ text: "✏️ Custom range", callback_data: "time:custom" }],
+      [{ text: "➕ Add slot", callback_data: "book:add" }],
+      [{ text: "🗑 Remove a slot", callback_data: "book:remove" }],
+    ],
+  };
+}
+
+function buildPeriodKeyboard(selected) {
+  const periods = ["morning", "afternoon", "evening"];
+  const labels = { morning: "🌅 Morning", afternoon: "☀️ Afternoon", evening: "🌆 Evening" };
+  return {
+    inline_keyboard: [
+      periods.map((p) => ({
+        text: selected.includes(p) ? `✅ ${labels[p]}` : labels[p],
+        callback_data: `period:${p}`,
+      })),
+      [{ text: "Confirm ✓", callback_data: "period:confirm" }],
+    ],
+  };
+}
+
+function buildPeriodTimeKeyboard(period) {
+  const presets = PERIOD_PRESETS[period] ?? [];
+  return {
+    inline_keyboard: [
+      presets.map(([from, to]) => ({ text: `${from}–${to}`, callback_data: `ptime:${from}-${to}` })),
+      [{ text: "✏️ Custom", callback_data: "ptime:custom" }],
+    ],
+  };
+}
+
+function buildRemoveKeyboard(prefs) {
+  return {
+    inline_keyboard: [
+      ...prefs.map((p, i) => {
+        const days = p.days?.length ? p.days.join(", ") : "any day";
+        return [{ text: `🗑 ${p.from}–${p.to} on ${days}`, callback_data: `remove:${i}` }];
+      }),
+      [{ text: "Cancel", callback_data: "remove:cancel" }],
     ],
   };
 }
 
 function buildDayKeyboard(selected) {
   const anyDay = selected.length === 0;
-  const weekdays = DAY_NAMES.slice(1); // Mon–Sun
+  // Mon–Sat then Sun on its own row
+  const weekdays = [...DAY_NAMES.slice(1), DAY_NAMES[0]];
 
   return {
     inline_keyboard: [
@@ -262,12 +378,14 @@ function buildDayKeyboard(selected) {
 // ── Telegram API helpers ──────────────────────────────────────────────────────
 
 async function sendMessage(env, chatId, text) {
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text }),
   });
+  return res.json();
 }
+
 
 async function sendMessageWithKeyboard(env, chatId, text, replyMarkup) {
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -395,16 +513,15 @@ async function checkAvailability(env, controller) {
   }
   await env.STATE.delete("api-error-notified");
 
-  // If a booking preference is set, try to book a matching slot
-  const pref = await env.STATE.get("booking-pref", { type: "json" });
-  if (pref && slots.length > 0) {
-    const match = slots.find((s) => slotMatchesPref(s, pref));
+  // If booking preferences are set, try to book the first matching slot
+  const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
+  if (prefs.length > 0 && slots.length > 0) {
+    const match = slots.find((s) => slotMatchesPref(s, prefs));
     if (match) {
       const bookDate = match.date;
       const bookTime = match.time;
       const result = await attemptBooking(env, token, bookDate, bookTime);
       if (result.success) {
-        await env.STATE.delete("booking-pref");
         await notify(env, `✅ Booked! Tennis court on ${bookDate} at ${result.time} (${result.court})`);
       } else {
         console.error(`Booking attempt failed for ${bookDate} ${bookTime}: ${result.reason}`);
@@ -412,9 +529,9 @@ async function checkAvailability(env, controller) {
     }
   }
 
-  // Log any seen slots (whether booked, skipped, or no pref set)
+  // Log any seen slots
   if (slots.length > 0) {
-    await appendSlotLog(env, now, slots, pref);
+    await appendSlotLog(env, now, slots, prefs);
   }
 
   // Notify immediately if slots found; otherwise only at 08:00, 12:00, 20:00 London time
@@ -439,13 +556,14 @@ async function checkAvailability(env, controller) {
   await env.STATE.put("last-run", new Date(now).toISOString());
 }
 
-async function appendSlotLog(env, now, slots, pref) {
+async function appendSlotLog(env, now, slots, prefs) {
   const existing = await env.STATE.get("slot-log", { type: "json" }) ?? [];
-  const matched = pref ? slots.filter((s) => slotMatchesPref(s, pref)).map((s) => `${s.date} ${s.time}`) : [];
+  const matched = slots.filter((s) => slotMatchesPref(s, prefs)).map((s) => `${s.date} ${s.time}`);
+  const prefText = prefs.length ? prefs.map((p) => `${p.from}–${p.to}`).join(", ") : null;
   const entry = {
     at: new Date(now).toISOString(),
     slots: slots.map((s) => `${s.date} ${s.time}`),
-    pref: pref ? `${pref.from}–${pref.to} on ${pref.days?.join(",")||"any day"}` : null,
+    pref: prefText,
     matched,
   };
   const updated = [entry, ...existing].slice(0, 30);
@@ -454,28 +572,57 @@ async function appendSlotLog(env, now, slots, pref) {
 
 // ── Booking ───────────────────────────────────────────────────────────────────
 
-function normaliseDay(d) {
-  return DAY_NAMES.find((n) => n.toLowerCase() === d.slice(0, 3).toLowerCase()) ?? null;
+
+function slotMatchesPref(slot, prefs) {
+  return normPrefs(prefs).some((p) => slotMatchesSingle(slot, p));
 }
 
-function slotMatchesPref(slot, pref) {
+function slotMatchesSingle(slot, pref) {
   const time = extractSlotTime(slot);
   if (!time) return false;
-
-  const [sh, sm] = time.split(":").map(Number);
-  const [fh, fm] = pref.from.split(":").map(Number);
-  const [th, tm] = pref.to.split(":").map(Number);
-  const slotMins = sh * 60 + sm;
-  if (slotMins < fh * 60 + fm || slotMins >= th * 60 + tm) return false;
-
+  const slotMins = timeToMins(time);
+  if (slotMins < timeToMins(pref.from) || slotMins >= timeToMins(pref.to)) return false;
   if (pref.days?.length > 0) {
     const date = extractSlotDate(slot);
     if (!date) return false;
     const dayName = DAY_NAMES[new Date(date + "T12:00:00Z").getUTCDay()];
     if (!pref.days.includes(dayName)) return false;
   }
-
   return true;
+}
+
+function normPrefs(raw) {
+  if (!raw) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+function timeToMins(t) {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function capitalise(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function findOverlaps(newEntries, existing) {
+  const overlaps = [];
+  for (const n of newEntries) {
+    for (const e of existing) {
+      const daysClash = !n.days.length || !e.days?.length || n.days.some((d) => e.days.includes(d));
+      const timeClash = timeToMins(n.from) < timeToMins(e.to) && timeToMins(e.from) < timeToMins(n.to);
+      if (daysClash && timeClash) overlaps.push(`${n.from}–${n.to} overlaps with ${e.from}–${e.to}`);
+    }
+  }
+  return overlaps;
+}
+
+function formatPrefs(prefs) {
+  if (!prefs.length) return "None.";
+  return prefs.map((p, i) => {
+    const days = p.days?.length ? p.days.join(", ") : "any day";
+    return `${i + 1}. ${p.from}–${p.to} on ${days}`;
+  }).join("\n");
 }
 
 function extractSlotDate(slot) {
@@ -506,7 +653,7 @@ async function attemptBooking(env, token, date, time) {
   const resourceKeyId = court.resourceKey?.id ?? court.resourceKey ?? court.id;
   const courtName = court.name ?? court.courtName ?? `Court ${resourceKeyId}`;
 
-  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKeyId}/bookings?date=${date}&time=${time}`;
+  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKeyId}/bookingsings?date=${date}&time=${time}`;
   let bookRes;
   try {
     bookRes = await fetch(bookUrl, {
