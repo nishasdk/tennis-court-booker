@@ -319,9 +319,6 @@ async function checkAvailability(env, controller) {
   const nextCheckTime = now + randomDelayMs();
   await env.STATE.put("next-check-time", String(nextCheckTime));
 
-  const startDate = toDateString(now);
-  const endDate = toDateString(now + 7 * 24 * 60 * 60 * 1000);
-
   let token;
   try {
     token = await getAuthToken(env);
@@ -335,48 +332,52 @@ async function checkAvailability(env, controller) {
     return;
   }
 
-  const url = `${VAPI_BASE}/clubs/${CLUB_ID}/classes?startDate=${startDate}&endDate=${endDate}`;
-
-  let res;
-  try {
-    res = await fetch(url, { headers: authHeaders(token) });
-  } catch (err) {
-    console.error(`Fetch failed: ${err.message}`);
-    return;
-  }
-
-  if (res.status === 401) {
-    await env.STATE.delete("auth:token");
+  // Check each date in the 7-day booking window
+  const slots = [];
+  let apiErrored = false;
+  for (let i = 0; i <= 7; i++) {
+    const date = toDateString(now + i * 24 * 60 * 60 * 1000);
+    const url = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}?date=${date}`;
     try {
-      token = await getAuthToken(env);
-      res = await fetch(url, { headers: authHeaders(token) });
+      let res = await fetch(url, { headers: authHeaders(token) });
+      if (res.status === 401) {
+        await env.STATE.delete("auth:token");
+        token = await getAuthToken(env);
+        res = await fetch(url, { headers: authHeaders(token) });
+      }
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          for (const slot of data) {
+            if (slot.isAvailable) slots.push({ ...slot, date });
+          }
+        }
+      } else {
+        console.error(`API error for ${date}: ${res.status}`);
+        apiErrored = true;
+      }
     } catch (err) {
-      console.error(`Retry after re-auth failed: ${err.message}`);
-      return;
+      console.error(`Fetch failed for ${date}: ${err.message}`);
     }
   }
 
-  if (!res.ok) {
-    console.error(`API error: ${res.status}`);
+  if (apiErrored && slots.length === 0) {
     if (!await env.STATE.get("api-error-notified")) {
       await env.STATE.put("api-error-notified", "1");
-      await notify(env, `⚠️ API error: ${res.status}`);
+      await notify(env, `⚠️ API error fetching court availability`);
     }
     return;
   }
-
   await env.STATE.delete("api-error-notified");
-  const body = await res.text();
-  const slots = findAvailableSlots(body);
 
   // If a booking preference is set, try to book a matching slot
   const pref = await env.STATE.get("booking-pref", { type: "json" });
   if (pref && slots.length > 0) {
     const match = slots.find((s) => slotMatchesPref(s, pref));
     if (match) {
-      const bookDate = extractSlotDate(match);
-      const bookTime = extractSlotTime(match);
-      const result = await attemptBooking(env, bookDate, bookTime);
+      const bookDate = match.date;
+      const bookTime = match.time;
+      const result = await attemptBooking(env, token, bookDate, bookTime);
       if (result.success) {
         await env.STATE.delete("booking-pref");
         await notify(env, `✅ Booked! Tennis court on ${bookDate} at ${result.time} (${result.court})`);
@@ -387,8 +388,6 @@ async function checkAvailability(env, controller) {
   }
 
   await notify(env, buildMessage(slots, controller, nextCheckTime));
-
-  await env.STATE.put(`snapshot:classes:${CLUB_ID}`, body);
   await env.STATE.put("last-run", new Date(now).toISOString());
 }
 
@@ -419,26 +418,14 @@ function slotMatchesPref(slot, pref) {
 }
 
 function extractSlotDate(slot) {
-  const raw = slot.startDateTime ?? slot.date ?? "";
-  return raw.slice(0, 10);
+  return slot.date ?? "";
 }
 
 function extractSlotTime(slot) {
-  const raw = slot.startDateTime ?? slot.startTime ?? slot.time ?? "";
-  const iso = raw.match(/T(\d{2}:\d{2})/);
-  if (iso) return iso[1];
-  const plain = raw.match(/^(\d{2}:\d{2})/);
-  return plain ? plain[1] : null;
+  return slot.time ?? null;
 }
 
-async function attemptBooking(env, date, time) {
-  let token;
-  try {
-    token = await getAuthToken(env);
-  } catch (err) {
-    return { success: false, reason: `Auth failed: ${err.message}` };
-  }
-
+async function attemptBooking(env, token, date, time) {
   const resourcesUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources?date=${date}&time=${time}`;
   let resourcesRes;
   try {
@@ -454,40 +441,34 @@ async function attemptBooking(env, date, time) {
   if (courts.length === 0) return { success: false, reason: "No courts available at that time" };
 
   const court = courts[0];
-  const resourceKey = court.resourceKey ?? court.id ?? court.key;
-  const courtName = court.name ?? court.courtName ?? `Court ${resourceKey}`;
+  // resourceKey comes back as {club, id} — the booking URL and body use just the numeric id
+  const resourceKeyId = court.resourceKey?.id ?? court.resourceKey ?? court.id;
+  const courtName = court.name ?? court.courtName ?? `Court ${resourceKeyId}`;
 
-  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKey}/bookings?date=${date}&time=${time}`;
+  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKeyId}/bookings?date=${date}&time=${time}`;
   let bookRes;
   try {
     bookRes = await fetch(bookUrl, {
       method: "POST",
       headers: { ...authHeaders(token), "content-type": "application/json" },
-      body: JSON.stringify({ activityId: ACTIVITY_ID, resourceKey, date, startTime: time, duration: "60" }),
+      body: JSON.stringify({ activityId: ACTIVITY_ID, resourceKey: resourceKeyId, date, startTime: time, duration: "60" }),
     });
   } catch (err) {
     return { success: false, reason: `Booking request failed: ${err.message}` };
   }
 
-  return bookRes.ok
-    ? { success: true, time, court: courtName }
-    : { success: false, reason: `Booking rejected: ${bookRes.status}` };
+  if (!bookRes.ok) {
+    const errBody = await bookRes.text().catch(() => "");
+    return { success: false, reason: `Booking rejected: ${bookRes.status} — ${errBody.slice(0, 200)}` };
+  }
+  return { success: true, time, court: courtName };
 }
 
 // ── Availability helpers ──────────────────────────────────────────────────────
 
-function findAvailableSlots(body) {
-  try {
-    const data = JSON.parse(body);
-    const classes = Array.isArray(data) ? data : (data.classes ?? data.data ?? []);
-    return classes.filter((c) => {
-      const bookable = c.isBookable ?? c.bookable ?? c.availableSpaces > 0;
-      const isCourt = /tennis|court|squash/i.test(c.name ?? c.activityName ?? "");
-      return bookable && isCourt;
-    });
-  } catch {
-    return [];
-  }
+function findAvailableSlots(slots) {
+  // slots are already filtered (isAvailable: true) and date-tagged by checkAvailability
+  return Array.isArray(slots) ? slots : [];
 }
 
 function buildMessage(slots, controller, nextCheckTime) {
@@ -496,7 +477,7 @@ function buildMessage(slots, controller, nextCheckTime) {
   const slotText =
     slots.length === 0
       ? "Currently no open slots"
-      : `Currently open slots at: ${slots.map((s) => `${s.name ?? s.activityName} (${s.date ?? s.startDateTime ?? "unknown"})`).join(", ")}`;
+      : `Currently open slots: ${slots.map((s) => `${s.date} at ${s.time}`).join(", ")}`;
   return `${fmt(now)}: checked for tennis court booking at Fulham Pools. ${slotText}. Check will run again at: ${fmt(next)}`;
 }
 
