@@ -283,6 +283,26 @@ async function handleCallbackQuery(query, env) {
     return;
   }
 
+  // ── Quick-book from notification ──
+  if (data.startsWith("quickbook:")) {
+    const [, date, time] = data.split(":");
+    await editMessageText(env, chatId, messageId, `⏳ Booking ${fmtSlotDate(date)} at ${time}...`);
+    let token;
+    try {
+      token = await getAuthToken(env);
+    } catch (err) {
+      await editMessageText(env, chatId, messageId, `⚠️ Auth failed: ${err.message}`);
+      return;
+    }
+    const result = await attemptBooking(env, token, date, time);
+    if (result.success) {
+      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
+    } else {
+      await editMessageText(env, chatId, messageId, `❌ Booking failed: ${result.reason}`);
+    }
+    return;
+  }
+
   if (data === "remove:cancel") {
     await env.STATE.delete(convoKey);
     const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
@@ -522,21 +542,25 @@ async function checkAvailability(env, controller) {
       const bookTime = match.time;
       const result = await attemptBooking(env, token, bookDate, bookTime);
       if (result.success) {
-        await notify(env, `✅ Booked! Tennis court on ${bookDate} at ${result.time} (${result.court})`);
+        await notify(env, `✅ Court booked!\n📅 ${fmtSlotDate(bookDate)} at ${result.time}\n🎾 ${result.court}`);
       } else {
-        console.error(`Booking attempt failed for ${bookDate} ${bookTime}: ${result.reason}`);
+        if (!await env.STATE.get("book-error-notified")) {
+          await env.STATE.put("book-error-notified", "1");
+          await notify(env, `⚠️ Slot found (${bookDate} at ${bookTime}) but booking failed: ${result.reason}`);
+        }
       }
     }
   }
+  await env.STATE.delete("book-error-notified");
 
   // Log any seen slots
   if (slots.length > 0) {
     await appendSlotLog(env, now, slots, prefs);
   }
 
-  // Notify immediately if slots found; otherwise only at 08:00, 12:00, 20:00 London time
+  // Notify immediately if slots found (with Book buttons); otherwise only at 08:00, 12:00, 20:00 London time
   if (slots.length > 0) {
-    await notify(env, buildMessage(slots, controller, nextCheckTime));
+    await notifyWithBookButtons(env, slots, controller, nextCheckTime);
   } else {
     const hour = londonHour(new Date(now));
     const today = toDateString(now);
@@ -685,8 +709,30 @@ function buildMessage(slots, controller, nextCheckTime) {
   const slotText =
     slots.length === 0
       ? "Currently no open slots"
-      : `Currently open slots: ${slots.map((s) => `${s.date} at ${s.time}`).join(", ")}`;
-  return `${fmt(now)}: checked for tennis court booking at Fulham Pools. ${slotText}. Check will run again at: ${fmt(next)}`;
+      : `Open slots:\n${slots.map((s) => `• ${fmtSlotDate(s.date)} at ${s.time}`).join("\n")}`;
+  return `${fmt(now)}: checked Fulham Pools. ${slotText}\n\nNext check: ${fmt(next)}`;
+}
+
+function fmtSlotDate(dateStr) {
+  const d = new Date(dateStr + "T12:00:00Z");
+  return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+}
+
+async function notifyWithBookButtons(env, slots, controller, nextCheckTime) {
+  const text = buildMessage(slots, controller, nextCheckTime);
+  // Show a Book button for each slot (max 5 to keep keyboard manageable)
+  const keyboard = {
+    inline_keyboard: slots.slice(0, 5).map((s) => ([{
+      text: `📅 Book ${fmtSlotDate(s.date)} at ${s.time}`,
+      callback_data: `quickbook:${s.date}:${s.time}`,
+    }])),
+  };
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_GRPCHAT_ID) { console.log(text); return; }
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: env.TELEGRAM_GRPCHAT_ID, text, reply_markup: keyboard }),
+  });
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
