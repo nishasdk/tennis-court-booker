@@ -2,9 +2,13 @@
 
 A personal Telegram bot that books tennis courts at my local Virgin Active gym for me.
 
-![Booking confirmation in Telegram](assets/booking-demo.png)
-![Slot alerts with quick-book buttons](assets/alerts-example.png)
-![Auto-booking preferences grid](assets/slots-example.png)
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="assets/booking-demo.png" width="220"/><br/><sub>Booking confirmation</sub></td>
+    <td align="center" width="33%"><img src="assets/alerts-example.png" width="220"/><br/><sub>Slot alerts with quick-book buttons</sub></td>
+    <td align="center" width="33%"><img src="assets/slots-example.png" width="220"/><br/><sub>Auto-booking preferences grid</sub></td>
+  </tr>
+</table>
 
 ## Why
 
