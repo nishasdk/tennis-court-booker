@@ -116,15 +116,12 @@ async function handleTelegramUpdate(update, env) {
     }
 
     const prefs = normPrefs(await env.STATE.get("booking-pref", { type: "json" }));
-    if (prefs.length === 0) {
-      const res = await sendMessageWithKeyboard(env, chatId, "When would you like to play? (select all that apply)", buildPeriodKeyboard([]));
-      const msgId = res?.result?.message_id;
-      await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "period_select", selectedPeriods: [], messageId: msgId }), { expirationTtl: 1800 });
-    } else {
-      const res = await sendMessageWithKeyboard(env, chatId, `Current preferences:\n\n${formatPrefs(prefs)}\n\nWhat would you like to do?`, buildBookMenuKeyboard());
-      const msgId = res?.result?.message_id;
-      await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "book_menu", messageId: msgId }), { expirationTtl: 1800 });
-    }
+    const menuText = prefs.length
+      ? `Auto-booking preferences:\n\n${formatPrefs(prefs)}\n\nWhat would you like to do?`
+      : "No auto-booking preferences set yet.\n\nWhat would you like to do?";
+    const res = await sendMessageWithKeyboard(env, chatId, menuText, buildBookMenuKeyboard());
+    const msgId = res?.result?.message_id;
+    await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "book_menu", messageId: msgId }), { expirationTtl: 1800 });
     return;
   }
 
@@ -138,9 +135,9 @@ async function handleTelegramUpdate(update, env) {
     const lines = prefs.map((p, i) => {
       const anyDay = !p.days?.length;
       const dayLines = allDays.map((d) => `${anyDay || p.days.includes(d) ? "✅" : "◻️"}  ${d}`);
-      return `Slot ${i + 1} — ⏰ ${p.from}–${p.to}\n${dayLines.join("\n")}`;
+      return `Preference ${i + 1} — ⏰ ${p.from}–${p.to}\n${dayLines.join("\n")}`;
     });
-    await sendMessage(env, chatId, lines.join("\n\n"));
+    await sendMessage(env, chatId, `Auto-booking preferences:\n\n${lines.join("\n\n")}`);
     return;
   }
 
@@ -160,11 +157,54 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
+  if (cmd === "/scan") {
+    const sent = await sendMessage(env, chatId, "⏳ Scanning...");
+    const msgId = sent?.result?.message_id;
+    let token;
+    try {
+      token = await getAuthToken(env);
+    } catch (err) {
+      await editMessageText(env, chatId, msgId, `⚠️ Auth failed: ${err.message}`);
+      return;
+    }
+    const slots = [];
+    for (let i = 0; i <= 7; i++) {
+      const date = toDateString(Date.now() + i * 24 * 60 * 60 * 1000);
+      try {
+        const res = await fetch(`${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}?date=${date}`, { headers: authHeaders(token) });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) data.filter((s) => s.isAvailable).forEach((s) => slots.push({ ...s, date }));
+        }
+      } catch { /* skip */ }
+    }
+    if (slots.length === 0) {
+      await editMessageText(env, chatId, msgId, "No available slots found right now.");
+      return;
+    }
+    const text = `Found ${slots.length} slot${slots.length > 1 ? "s" : ""}:\n${slots.map((s) => `• ${fmtSlotDate(s.date)} at ${s.time}`).join("\n")}`;
+    const keyboard = {
+      inline_keyboard: slots.slice(0, 5).map((s) => ([{
+        text: `📅 Book ${fmtSlotDate(s.date)} at ${s.time}`,
+        callback_data: `quickbook:${s.date}:${s.time}`,
+      }])),
+    };
+    await editMessageText(env, chatId, msgId, text, keyboard);
+    return;
+  }
+
+  if (cmd === "/bookslot") {
+    const sent = await sendMessage(env, chatId, "Which date?", buildDateKeyboard());
+    const msgId = sent?.result?.message_id;
+    await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "bookslot_date", messageId: msgId }), { expirationTtl: 1800 });
+    return;
+  }
+
   if (cmd === "/help") {
     await sendMessage(
       env,
       chatId,
-      "/bookings — set up auto-booking interactively\n/bookings status — show current preference\n/bookings cancel — cancel auto-booking\n/slots — show your current time and day preferences\n/next — when is the next check\n/last — when was the last check\n/log — history of checks where slots were found",
+      "/scan — check availability right now\n/bookslot — manually pick a date and slot to book\n/bookings — set up auto-booking preferences\n/slots — view current preferences\n/log — history of checks that found slots\n/last — when was the last check\n/next — when is the next check",
     );
   }
 }
@@ -283,6 +323,46 @@ async function handleCallbackQuery(query, env) {
     return;
   }
 
+  // ── /bookslot date → time → book ──
+  if (data.startsWith("bsdate:")) {
+    const date = data.slice(7);
+    await editMessageText(env, chatId, messageId, `⏳ Fetching slots for ${fmtSlotDate(date)}...`);
+    let token;
+    try { token = await getAuthToken(env); } catch (err) {
+      await editMessageText(env, chatId, messageId, `⚠️ Auth failed: ${err.message}`);
+      return;
+    }
+    const res = await fetch(`${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}?date=${date}`, { headers: authHeaders(token) });
+    if (!res.ok) { await editMessageText(env, chatId, messageId, `⚠️ API error: ${res.status}`); return; }
+    const data2 = await res.json();
+    const available = Array.isArray(data2) ? data2.filter((s) => s.isAvailable) : [];
+    if (!available.length) { await editMessageText(env, chatId, messageId, `No available slots on ${fmtSlotDate(date)}.`); return; }
+    const keyboard = {
+      inline_keyboard: available.map((s) => ([{ text: s.time, callback_data: `bstime:${date}:${s.time}` }])),
+    };
+    await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "bookslot_time", date, messageId }), { expirationTtl: 1800 });
+    await editMessageText(env, chatId, messageId, `Available on ${fmtSlotDate(date)} — tap to book:`, keyboard);
+    return;
+  }
+
+  if (data.startsWith("bstime:")) {
+    const [, date, time] = data.split(":");
+    await editMessageText(env, chatId, messageId, `⏳ Booking ${fmtSlotDate(date)} at ${time}...`);
+    let token;
+    try { token = await getAuthToken(env); } catch (err) {
+      await editMessageText(env, chatId, messageId, `⚠️ Auth failed: ${err.message}`);
+      return;
+    }
+    const result = await attemptBooking(env, token, date, time);
+    await env.STATE.delete(`convo:${chatId}`);
+    if (result.success) {
+      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
+    } else {
+      await editMessageText(env, chatId, messageId, `❌ Booking failed: ${result.reason}`);
+    }
+    return;
+  }
+
   // ── Quick-book from notification ──
   if (data.startsWith("quickbook:")) {
     const [, date, time] = data.split(":");
@@ -328,6 +408,19 @@ async function advancePeriodTime(env, chatId, convo, from, to) {
 }
 
 // ── Keyboard builders ─────────────────────────────────────────────────────────
+
+function buildDateKeyboard() {
+  const days = [];
+  for (let i = 0; i <= 7; i++) {
+    const ms = Date.now() + i * 24 * 60 * 60 * 1000;
+    const date = toDateString(ms);
+    days.push({ text: fmtSlotDate(date), callback_data: `bsdate:${date}` });
+  }
+  // Two per row
+  const rows = [];
+  for (let i = 0; i < days.length; i += 2) rows.push(days.slice(i, i + 2));
+  return { inline_keyboard: rows };
+}
 
 function buildBookMenuKeyboard() {
   return {
@@ -397,11 +490,13 @@ function buildDayKeyboard(selected) {
 
 // ── Telegram API helpers ──────────────────────────────────────────────────────
 
-async function sendMessage(env, chatId, text) {
+async function sendMessage(env, chatId, text, replyMarkup = null) {
+  const body = { chat_id: chatId, text };
+  if (replyMarkup) body.reply_markup = replyMarkup;
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify(body),
   });
   return res.json();
 }
