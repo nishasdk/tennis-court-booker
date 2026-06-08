@@ -376,7 +376,7 @@ async function handleCallbackQuery(query, env) {
     const result = await attemptBooking(env, token, date, time, rkId || null);
     await env.STATE.delete(`convo:${chatId}`);
     if (result.success) {
-      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
+      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}\n📆 [Add to Google Calendar](${calendarLink(date, result.time, result.court)})`, null, { parse_mode: "Markdown" });
     } else {
       await editMessageText(env, chatId, messageId, `❌ Booking failed: ${result.reason}`);
     }
@@ -396,7 +396,7 @@ async function handleCallbackQuery(query, env) {
     }
     const result = await attemptBooking(env, token, date, time, rkId || null);
     if (result.success) {
-      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
+      await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}\n📆 [Add to Google Calendar](${calendarLink(date, result.time, result.court)})`, null, { parse_mode: "Markdown" });
     } else {
       await editMessageText(env, chatId, messageId, `❌ Booking failed: ${result.reason}`);
     }
@@ -531,8 +531,8 @@ async function sendMessageWithKeyboard(env, chatId, text, replyMarkup) {
   return res.json();
 }
 
-async function editMessageText(env, chatId, messageId, text, replyMarkup = null) {
-  const body = { chat_id: chatId, message_id: messageId, text };
+async function editMessageText(env, chatId, messageId, text, replyMarkup = null, extra = {}) {
+  const body = { chat_id: chatId, message_id: messageId, text, ...extra };
   if (replyMarkup) body.reply_markup = replyMarkup;
   await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
     method: "POST",
@@ -657,7 +657,7 @@ async function checkAvailability(env, controller) {
       const bookTime = match.time;
       const result = await attemptBooking(env, token, bookDate, bookTime, match.resourceKey?.id ?? null);
       if (result.success) {
-        await notify(env, `✅ Court booked!\n📅 ${fmtSlotDate(bookDate)} at ${result.time}\n🎾 ${result.court}`);
+        await notify(env, `✅ Court booked!\n📅 ${fmtSlotDate(bookDate)} at ${result.time}\n🎾 ${result.court}\n📆 [Add to Google Calendar](${calendarLink(result.date ?? bookDate, result.time, result.court)})`, null, { parse_mode: "Markdown" });
       } else {
         if (!await env.STATE.get("book-error-notified")) {
           await env.STATE.put("book-error-notified", "1");
@@ -811,7 +811,24 @@ async function attemptBooking(env, token, date, time, resourceKeyId = null) {
     const errBody = await bookRes.text().catch(() => "");
     return { success: false, reason: `Booking rejected: ${bookRes.status} — ${errBody.slice(0, 200)}` };
   }
-  return { success: true, time, court: courtName };
+  return { success: true, time, court: courtName, date };
+}
+
+function calendarLink(date, time, court) {
+  const [h, m] = time.split(":").map(Number);
+  const pad = n => String(n).padStart(2, "0");
+  const fmt = (y, mo, d, hh, mm) => `${y}${pad(mo)}${pad(d)}T${pad(hh)}${pad(mm)}00`;
+  const [y, mo, d] = date.split("-").map(Number);
+  const start = fmt(y, mo, d, h, m);
+  const end = fmt(y, mo, d, h + 1, m);
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: `Tennis — ${court}`,
+    dates: `${start}/${end}`,
+    details: `Booked via Virgin Active Fulham Pools`,
+    location: "Virgin Active Fulham Pools, Fulham, London",
+  });
+  return `https://calendar.google.com/calendar/render?${params}`;
 }
 
 // ── Availability helpers ──────────────────────────────────────────────────────
@@ -911,7 +928,7 @@ function authHeaders(token) {
 
 // ── Notify ────────────────────────────────────────────────────────────────────
 
-async function notify(env, message) {
+async function notify(env, message, extra = {}) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_GRPCHAT_ID) {
     console.log(message);
     return;
@@ -919,7 +936,7 @@ async function notify(env, message) {
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: env.TELEGRAM_GRPCHAT_ID, text: message }),
+    body: JSON.stringify({ chat_id: env.TELEGRAM_GRPCHAT_ID, text: message, ...extra }),
   });
   if (!res.ok) console.error(`Telegram notify failed: ${res.status}`);
 }

@@ -42,7 +42,7 @@ I can also chat with the bot directly to manage everything:
 - [ ] Support booking group fitness classes (not just courts)
 - [ ] Integrate with other platforms for Padel court bookings
 - [ ] Support multiple Virgin Active locations via the same API
-- [ ] Generate an "Add to Calendar" link when a booking is confirmed
+- [x] Generate an "Add to Calendar" link when a booking is confirmed
 - [ ] Poll group chat members for availability before booking
 
 ## Notes
