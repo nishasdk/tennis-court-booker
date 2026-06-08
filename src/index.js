@@ -50,6 +50,26 @@ export default {
       return new Response("Notification sent", { status: 200 });
     }
 
+    if (url.pathname === `/setup/${env.TELEGRAM_BOT_TOKEN}`) {
+      const commands = [
+        { command: "scan",      description: "Check availability right now" },
+        { command: "bookslot",  description: "Pick a date and slot to book manually" },
+        { command: "bookings",  description: "Manage auto-booking preferences" },
+        { command: "slots",     description: "View current auto-booking preferences" },
+        { command: "log",       description: "History of checks that found slots" },
+        { command: "last",      description: "When was the last check" },
+        { command: "next",      description: "When is the next check" },
+        { command: "help",      description: "List all commands" },
+      ];
+      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ commands }),
+      });
+      const result = await res.json();
+      return new Response(JSON.stringify(result), { status: res.status, headers: { "content-type": "application/json" } });
+    }
+
     return new Response("Not found", { status: 404 });
   },
 };
