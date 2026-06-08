@@ -206,7 +206,7 @@ async function handleTelegramUpdate(update, env) {
     const keyboard = {
       inline_keyboard: slots.slice(0, 5).map((s) => ([{
         text: `📅 Book ${fmtSlotDate(s.date)} at ${s.time}`,
-        callback_data: `quickbook:${s.date}:${s.time}`,
+        callback_data: `quickbook:${s.date}|${s.time}|${s.resourceKey?.id ?? ""}`,
       }])),
     };
     await editMessageText(env, chatId, msgId, text, keyboard);
@@ -358,7 +358,7 @@ async function handleCallbackQuery(query, env) {
     const available = Array.isArray(data2) ? data2.filter((s) => s.isAvailable) : [];
     if (!available.length) { await editMessageText(env, chatId, messageId, `No available slots on ${fmtSlotDate(date)}.`); return; }
     const keyboard = {
-      inline_keyboard: available.map((s) => ([{ text: s.time, callback_data: `bstime:${date}:${s.time}` }])),
+      inline_keyboard: available.map((s) => ([{ text: s.time, callback_data: `bstime:${date}|${s.time}|${s.resourceKey?.id ?? ""}` }])),
     };
     await env.STATE.put(`convo:${chatId}`, JSON.stringify({ step: "bookslot_time", date, messageId }), { expirationTtl: 1800 });
     await editMessageText(env, chatId, messageId, `Available on ${fmtSlotDate(date)} — tap to book:`, keyboard);
@@ -366,14 +366,14 @@ async function handleCallbackQuery(query, env) {
   }
 
   if (data.startsWith("bstime:")) {
-    const [, date, time] = data.split(":");
+    const [date, time, rkId] = data.slice(7).split("|");
     await editMessageText(env, chatId, messageId, `⏳ Booking ${fmtSlotDate(date)} at ${time}...`);
     let token;
     try { token = await getAuthToken(env); } catch (err) {
       await editMessageText(env, chatId, messageId, `⚠️ Auth failed: ${err.message}`);
       return;
     }
-    const result = await attemptBooking(env, token, date, time);
+    const result = await attemptBooking(env, token, date, time, rkId || null);
     await env.STATE.delete(`convo:${chatId}`);
     if (result.success) {
       await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
@@ -385,7 +385,7 @@ async function handleCallbackQuery(query, env) {
 
   // ── Quick-book from notification ──
   if (data.startsWith("quickbook:")) {
-    const [, date, time] = data.split(":");
+    const [date, time, rkId] = data.slice(10).split("|");
     await editMessageText(env, chatId, messageId, `⏳ Booking ${fmtSlotDate(date)} at ${time}...`);
     let token;
     try {
@@ -394,7 +394,7 @@ async function handleCallbackQuery(query, env) {
       await editMessageText(env, chatId, messageId, `⚠️ Auth failed: ${err.message}`);
       return;
     }
-    const result = await attemptBooking(env, token, date, time);
+    const result = await attemptBooking(env, token, date, time, rkId || null);
     if (result.success) {
       await editMessageText(env, chatId, messageId, `✅ Court booked!\n📅 ${fmtSlotDate(date)} at ${result.time}\n🎾 ${result.court}`);
     } else {
@@ -655,7 +655,7 @@ async function checkAvailability(env, controller) {
     if (match) {
       const bookDate = match.date;
       const bookTime = match.time;
-      const result = await attemptBooking(env, token, bookDate, bookTime);
+      const result = await attemptBooking(env, token, bookDate, bookTime, match.resourceKey?.id ?? null);
       if (result.success) {
         await notify(env, `✅ Court booked!\n📅 ${fmtSlotDate(bookDate)} at ${result.time}\n🎾 ${result.court}`);
       } else {
@@ -772,27 +772,30 @@ function extractSlotTime(slot) {
   return slot.time ?? null;
 }
 
-async function attemptBooking(env, token, date, time) {
-  const resourcesUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources?date=${date}&time=${time}`;
-  let resourcesRes;
-  try {
-    resourcesRes = await fetch(resourcesUrl, { headers: authHeaders(token) });
-  } catch (err) {
-    return { success: false, reason: `Resources fetch failed: ${err.message}` };
+const COURT_NAMES = { 201: "Court 1", 202: "Court 2", 203: "Court 3" };
+
+async function attemptBooking(env, token, date, time, resourceKeyId = null) {
+  let courtName = COURT_NAMES[resourceKeyId] ?? `Court ${resourceKeyId}`;
+
+  if (!resourceKeyId) {
+    // Fall back to resources lookup if we don't already know the court
+    const resourcesUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources?date=${date}&time=${time}`;
+    let resourcesRes;
+    try {
+      resourcesRes = await fetch(resourcesUrl, { headers: authHeaders(token) });
+    } catch (err) {
+      return { success: false, reason: `Resources fetch failed: ${err.message}` };
+    }
+    if (!resourcesRes.ok) return { success: false, reason: `Resources API error: ${resourcesRes.status}` };
+    const data = await resourcesRes.json();
+    const courts = Array.isArray(data) ? data : (data.resources ?? data.data ?? []);
+    if (courts.length === 0) return { success: false, reason: "No courts available at that time" };
+    const court = courts[0];
+    resourceKeyId = court.resourceKey?.id ?? court.resourceKey ?? court.id;
+    courtName = COURT_NAMES[resourceKeyId] ?? court.name ?? `Court ${resourceKeyId}`;
   }
 
-  if (!resourcesRes.ok) return { success: false, reason: `Resources API error: ${resourcesRes.status}` };
-
-  const data = await resourcesRes.json();
-  const courts = Array.isArray(data) ? data : (data.resources ?? data.data ?? []);
-  if (courts.length === 0) return { success: false, reason: "No courts available at that time" };
-
-  const court = courts[0];
-  // resourceKey comes back as {club, id} — the booking URL and body use just the numeric id
-  const resourceKeyId = court.resourceKey?.id ?? court.resourceKey ?? court.id;
-  const courtName = court.name ?? court.courtName ?? `Court ${resourceKeyId}`;
-
-  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKeyId}/bookingsings?date=${date}&time=${time}`;
+  const bookUrl = `${VAPI_BASE}/clubs/${CLUB_ID}/activity/${ACTIVITY_ID}/resources/${resourceKeyId}/bookings?date=${date}&time=${time}`;
   let bookRes;
   try {
     bookRes = await fetch(bookUrl, {
@@ -839,7 +842,7 @@ async function notifyWithBookButtons(env, slots, controller, nextCheckTime) {
   const keyboard = {
     inline_keyboard: slots.slice(0, 5).map((s) => ([{
       text: `📅 Book ${fmtSlotDate(s.date)} at ${s.time}`,
-      callback_data: `quickbook:${s.date}:${s.time}`,
+      callback_data: `quickbook:${s.date}|${s.time}|${s.resourceKey?.id ?? ""}`,
     }])),
   };
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_GRPCHAT_ID) { console.log(text); return; }

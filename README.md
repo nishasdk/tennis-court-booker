@@ -2,6 +2,10 @@
 
 A personal Telegram bot that books tennis courts at my local Virgin Active gym for me.
 
+![Booking confirmation in Telegram](assets/booking-demo.png)
+![Slot alerts with quick-book buttons](assets/alerts-example.png)
+![Auto-booking preferences grid](assets/slots-example.png)
+
 ## Why
 
 My gym's app is unreliable on poor connections, and popular slots go fast. I built a bot I can message from anywhere to check availability and book a court — no app required.
